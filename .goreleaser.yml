@@ -23,36 +23,9 @@ builds:
       - -s -w -X github.com/looplj/axonhub/internal/build.BuildTime={{ .Date }}
     env:
       - CGO_ENABLED=0
-    goos:
-      - linux
-      - windows
-      - darwin
-      - freebsd
-    goarch:
-      - amd64
-      - arm64
-      - loong64
-    goarm:
-      - 7
-    ignore:
-      - goos: windows
-        goarch: arm
-      - goos: windows
-        goarch: s390x
-      - goos: windows
-        goarch: loong64
-      - goos: darwin
-        goarch: arm
-      - goos: darwin
-        goarch: s390x
-      - goos: darwin
-        goarch: loong64
-      - goos: freebsd
-        goarch: arm
-      - goos: freebsd
-        goarch: s390x
-      - goos: freebsd
-        goarch: loong64
+    targets:
+      - windows_amd64_v1
+      - linux_amd64_v1
 
 release:
   draft: true
