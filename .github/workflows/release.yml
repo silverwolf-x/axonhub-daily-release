@@ -36,9 +36,20 @@ jobs:
     env:
       RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
+      - name: Resolve canonical repository
+        id: repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          canonical_repository="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.full_name')"
+          echo "Using canonical repository: ${canonical_repository}"
+          echo "name=${canonical_repository}" >> "$GITHUB_OUTPUT"
+
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          repository: ${{ steps.repository.outputs.name }}
           ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
 
@@ -130,7 +141,7 @@ jobs:
           prerelease="$(jq -r '.prerelease' <<< "$release_json")"
 
           gh release edit "$RELEASE_TAG" \
-            --repo "$GITHUB_REPOSITORY" \
+            --repo "${{ steps.repository.outputs.name }}" \
             --title "$release_name" \
             --notes-file upstream-release-notes.md \
             --prerelease="$prerelease"
