@@ -28,7 +28,8 @@ builds:
       - linux_amd64_v1
 
 release:
-  draft: true
+  draft: false
+  prerelease: auto
   extra_files:
     - glob: ./config.schema.json
 

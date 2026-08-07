@@ -5,24 +5,60 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing version tag to release
+        required: true
+        type: string
+      upstream_repository:
+        description: Optional owner/repository used to mirror release metadata
+        required: false
+        default: ''
+        type: string
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Existing version tag to release
+        required: true
+        type: string
+      upstream_repository:
+        description: Optional owner/repository used to mirror release metadata
+        required: false
+        default: ''
+        type: string
 
 permissions:
   contents: write
-  packages: write
 
 jobs:
   goreleaser:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_tag || github.ref }}
           fetch-depth: 0
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag '$RELEASE_TAG'."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::Release tag '$RELEASE_TAG' does not exist."
+            exit 1
+          fi
 
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
           version: 10
+          run_install: false
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -42,27 +78,26 @@ jobs:
           cache: true
 
       - name: Update VERSION file
-        if: ${{ !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
+        if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
         run: |
-          VERSION="${GITHUB_REF#refs/tags/}"
-          echo "Updating VERSION file to: $VERSION"
-          echo "$VERSION" > internal/build/VERSION
+          echo "Updating VERSION file to: $RELEASE_TAG"
+          echo "$RELEASE_TAG" > internal/build/VERSION
           git add internal/build/VERSION
 
       - name: Commit VERSION file
-        if: ${{ !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
+        if: ${{ github.ref_type == 'tag' && !contains(github.ref_name, 'beta') && !contains(github.ref_name, 'rc') }}
         continue-on-error: true
         run: |
           # Configure git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
+
           # Check if VERSION files have changes
-          if git diff --cached --quiet VERSION internal/build/VERSION; then
+          if git diff --cached --quiet -- internal/build/VERSION; then
             echo "No changes to VERSION files"
           else
             # Commit VERSION files with [skip ci] to avoid triggering other workflows
-            git commit -m "chore: update VERSION to ${GITHUB_REF#refs/tags/} [skip ci]"
+            git commit -m "chore: update VERSION to ${RELEASE_TAG} [skip ci]"
             git push origin HEAD:${{ github.event.repository.default_branch }}
           fi
 
@@ -74,3 +109,28 @@ jobs:
           args: release --clean --skip=validate
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ env.RELEASE_TAG }}
+
+      - name: Copy upstream release metadata
+        if: ${{ inputs.upstream_repository != '' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REPOSITORY: ${{ inputs.upstream_repository }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api "repos/${UPSTREAM_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          )"
+          release_name="$(jq -r '.name // ""' <<< "$release_json")"
+          if [[ -z "$release_name" ]]; then
+            release_name="$RELEASE_TAG"
+          fi
+          jq -r '.body // ""' <<< "$release_json" > upstream-release-notes.md
+          prerelease="$(jq -r '.prerelease' <<< "$release_json")"
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$release_name" \
+            --notes-file upstream-release-notes.md \
+            --prerelease="$prerelease"

@@ -2,14 +2,11 @@
 # https://github.com/spf13/cobra/blob/master/LICENSE.txt
 name: Test
 on:
-  push:
-    branches:
-      - "unstable"
-      - "release/**"
   pull_request:
     branches:
       - "unstable"
       - "release/**"
+  workflow_dispatch:
 env:
   GO111MODULE: on
 jobs:
