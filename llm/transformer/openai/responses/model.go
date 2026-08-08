@@ -133,6 +133,9 @@ type Request struct {
 	// Used by OpenAI to cache responses for similar requests.
 	PromptCacheKey *string `json:"prompt_cache_key,omitempty"`
 
+	// Controls explicit prompt-cache breakpoints on GPT-5.6+ models.
+	PromptCacheOptions *PromptCacheOptions `json:"prompt_cache_options,omitempty"`
+
 	// The retention policy for the prompt cache. Any of "in-memory", "24h".
 	PromptCacheRetention *string `json:"prompt_cache_retention,omitempty"`
 
@@ -527,6 +530,9 @@ type Item struct {
 
 	// Any of "system", "user", "assistant", "developer".
 	Role string `json:"role,omitempty"`
+
+	// Explicitly marks the end of a prompt-cacheable prefix for GPT-5.6+.
+	PromptCacheBreakpoint *PromptCacheBreakpoint `json:"prompt_cache_breakpoint,omitempty"`
 
 	// The content of the message. Can be string or array of content items.
 	// For input items: string or array of input items.

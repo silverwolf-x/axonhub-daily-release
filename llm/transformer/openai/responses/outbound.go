@@ -248,9 +248,15 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		}
 	}
 
+	input := convertInputFromMessagesWithPromptCache(
+		llmReq.Messages,
+		llmReq.TransformOptions,
+		supportsExplicitPromptCache(llmReq.Model),
+	)
+
 	payload := Request{
 		Model:                llmReq.Model,
-		Input:                convertInputFromMessages(llmReq.Messages, llmReq.TransformOptions),
+		Input:                input,
 		Instructions:         convertInstructionsFromMessages(llmReq.Messages),
 		Tools:                tools,
 		ParallelToolCalls:    llmReq.ParallelToolCalls,
@@ -268,6 +274,7 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		StreamOptions:        convertStreamOptions(llmReq.StreamOptions, llmReq.TransformerMetadata),
 		Reasoning:            convertReasoning(llmReq),
 		PromptCacheKey:       llmReq.PromptCacheKey,
+		PromptCacheOptions:   promptCacheOptionsForInput(input),
 		PreviousResponseID:   llmReq.PreviousResponseID,
 		Include:              xmap.GetStringSlice(llmReq.TransformerMetadata, "include"),
 		MaxToolCalls:         xmap.GetInt64Ptr(llmReq.TransformerMetadata, "max_tool_calls"),

@@ -103,13 +103,23 @@ func leadingSystemMessageCount(msgs []llm.Message) int {
 // Assistant messages become items with type "message" and content array containing output_text items.
 // Tool calls become function_call items, tool results become function_call_output items.
 func convertInputFromMessages(msgs []llm.Message, transformOptions llm.TransformOptions) Input {
+	return convertInputFromMessagesWithPromptCache(msgs, transformOptions, false)
+}
+
+func convertInputFromMessagesWithPromptCache(
+	msgs []llm.Message,
+	transformOptions llm.TransformOptions,
+	enablePromptCache bool,
+) Input {
 	if len(msgs) == 0 {
 		return Input{}
 	}
 
 	wasArrayFormat := transformOptions.ArrayInputs != nil && *transformOptions.ArrayInputs
+	promptCacheMode := promptCacheBreakpointMode{enabled: enablePromptCache}
 
-	if len(msgs) == 1 && msgs[0].Role != "system" && msgs[0].Content.Content != nil && !wasArrayFormat {
+	if len(msgs) == 1 && msgs[0].Role != "system" && msgs[0].Content.Content != nil && !wasArrayFormat &&
+		promptCacheMode.forCacheControl(msgs[0].CacheControl) == nil {
 		return Input{Text: msgs[0].Content.Content}
 	}
 
@@ -129,9 +139,9 @@ func convertInputFromMessages(msgs []llm.Message, transformOptions llm.Transform
 		switch msg.Role {
 		case "system":
 			msg.Role = "developer"
-			items = append(items, convertUserMessage(msg))
+			items = append(items, convertUserMessageWithPromptCache(msg, promptCacheMode))
 		case "user", "developer":
-			items = append(items, convertUserMessage(msg))
+			items = append(items, convertUserMessageWithPromptCache(msg, promptCacheMode))
 		case "assistant":
 			assistantItems := convertAssistantMessage(msg)
 			items = append(items, assistantItems...)
@@ -158,7 +168,7 @@ func convertInputFromMessages(msgs []llm.Message, transformOptions llm.Transform
 				}
 			}
 
-			items = append(items, convertToolMessageWithType(msg, itemType))
+			items = append(items, convertToolMessageWithPromptCache(msg, itemType, promptCacheMode))
 		}
 	}
 
@@ -169,34 +179,60 @@ func convertInputFromMessages(msgs []llm.Message, transformOptions llm.Transform
 
 // convertUserMessage converts a user message to Responses API Item format.
 func convertUserMessage(msg llm.Message) Item {
+	return convertUserMessageWithPromptCache(msg, promptCacheBreakpointMode{})
+}
+
+func convertUserMessageWithPromptCache(msg llm.Message, promptCacheMode promptCacheBreakpointMode) Item {
 	var contentItems []Item
 
 	if msg.Content.Content != nil {
 		contentItems = append(contentItems, Item{
-			Type: "input_text",
-			Text: msg.Content.Content,
+			Type:                  "input_text",
+			Text:                  msg.Content.Content,
+			PromptCacheBreakpoint: promptCacheMode.forCacheControl(msg.CacheControl),
 		})
 	} else {
 		for _, p := range msg.Content.MultipleContent {
+			var contentItem Item
+
 			switch p.Type {
 			case "text":
 				if p.Text != nil {
-					contentItems = append(contentItems, Item{
-						Type: "input_text",
-						Text: p.Text,
-					})
+					contentItem = Item{
+						Type:                  "input_text",
+						Text:                  p.Text,
+						PromptCacheBreakpoint: promptCacheMode.forMessageContentPart(p),
+					}
 				}
 			case "image_url":
 				if p.ImageURL != nil {
-					contentItems = append(contentItems, Item{
-						Type:     "input_image",
-						ImageURL: &p.ImageURL.URL,
-						Detail:   p.ImageURL.Detail,
-					})
+					contentItem = Item{
+						Type:                  "input_image",
+						ImageURL:              &p.ImageURL.URL,
+						Detail:                p.ImageURL.Detail,
+						PromptCacheBreakpoint: promptCacheMode.forMessageContentPart(p),
+					}
 				}
 			case "compaction", "compaction_summary":
 				if p.Compact != nil {
-					contentItems = append(contentItems, compactionItemFromPart(p, p.Type))
+					contentItem = compactionItemFromPart(p, p.Type)
+				}
+			}
+
+			if contentItem.Type != "" {
+				contentItems = append(contentItems, contentItem)
+			}
+		}
+
+		// Anthropic may attach cache_control to the enclosing message. Apply it
+		// to the last supported content block when no block-level marker exists.
+		if breakpoint := promptCacheMode.forCacheControl(msg.CacheControl); breakpoint != nil {
+			for i := len(contentItems) - 1; i >= 0; i-- {
+				if contentItems[i].Type == "input_text" || contentItems[i].Type == "input_image" {
+					if contentItems[i].PromptCacheBreakpoint == nil {
+						contentItems[i].PromptCacheBreakpoint = breakpoint
+					}
+					break
 				}
 			}
 		}
@@ -322,19 +358,36 @@ func convertAssistantMessage(msg llm.Message) []Item {
 }
 
 func convertToolMessageWithType(msg llm.Message, itemType string) Item {
+	return convertToolMessageWithPromptCache(msg, itemType, promptCacheBreakpointMode{})
+}
+
+func convertToolMessageWithPromptCache(
+	msg llm.Message,
+	itemType string,
+	promptCacheMode promptCacheBreakpointMode,
+) Item {
 	var output Input
 
 	// Handle simple content first
 	if msg.Content.Content != nil {
-		output.Text = msg.Content.Content
+		if breakpoint := promptCacheMode.forCacheControl(msg.CacheControl); breakpoint != nil {
+			output.Items = []Item{{
+				Type:                  "input_text",
+				Text:                  msg.Content.Content,
+				PromptCacheBreakpoint: breakpoint,
+			}}
+		} else {
+			output.Text = msg.Content.Content
+		}
 	} else if len(msg.Content.MultipleContent) > 0 {
 		for _, p := range msg.Content.MultipleContent {
 			switch p.Type {
 			case "text":
 				if p.Text != nil {
 					output.Items = append(output.Items, Item{
-						Type: "input_text",
-						Text: p.Text,
+						Type:                  "input_text",
+						Text:                  p.Text,
+						PromptCacheBreakpoint: promptCacheMode.forMessageContentPart(p),
 					})
 				}
 			case "image_url":
@@ -349,10 +402,22 @@ func convertToolMessageWithType(msg llm.Message, itemType string) Item {
 					// function_call_output param schema makes it optional. Both
 					// document "auto" as the default, so always send one.
 					output.Items = append(output.Items, Item{
-						Type:     "input_image",
-						ImageURL: &p.ImageURL.URL,
-						Detail:   lo.ToPtr(lo.FromPtrOr(p.ImageURL.Detail, "auto")),
+						Type:                  "input_image",
+						ImageURL:              &p.ImageURL.URL,
+						Detail:                lo.ToPtr(lo.FromPtrOr(p.ImageURL.Detail, "auto")),
+						PromptCacheBreakpoint: promptCacheMode.forMessageContentPart(p),
 					})
+				}
+			}
+		}
+
+		if breakpoint := promptCacheMode.forCacheControl(msg.CacheControl); breakpoint != nil {
+			for i := len(output.Items) - 1; i >= 0; i-- {
+				if output.Items[i].Type == "input_text" || output.Items[i].Type == "input_image" {
+					if output.Items[i].PromptCacheBreakpoint == nil {
+						output.Items[i].PromptCacheBreakpoint = breakpoint
+					}
+					break
 				}
 			}
 		}
