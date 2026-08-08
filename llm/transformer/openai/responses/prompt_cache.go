@@ -29,9 +29,8 @@ func isEphemeralCacheControl(cacheControl *llm.CacheControl) bool {
 	return cacheControl != nil && cacheControl.Type == "ephemeral"
 }
 
-// supportsExplicitPromptCache reports whether a model is eligible for the GPT-5.6
-// prompt cache breakpoint contract after its channel has explicitly opted in.
-// Older models reject these request fields.
+// supportsExplicitPromptCache reports whether model uses the GPT-5.6 prompt
+// cache breakpoint contract. Older models reject these request fields.
 func supportsExplicitPromptCache(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if !strings.HasPrefix(model, "gpt-") {

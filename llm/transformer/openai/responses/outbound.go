@@ -49,11 +49,6 @@ type Config struct {
 	// APIKeyProvider provides API keys for authentication, required.
 	APIKeyProvider auth.APIKeyProvider `json:"-"`
 
-	// EnableExplicitPromptCache maps Anthropic ephemeral cache-control markers to
-	// GPT-5.6+ explicit prompt-cache breakpoints. It is disabled by default because
-	// OpenAI-compatible upstreams may expose the model name without supporting the fields.
-	EnableExplicitPromptCache bool `json:"enable_explicit_prompt_cache,omitempty"`
-
 	// Transport selects the upstream transport for Responses API requests.
 	// Empty and "http" use the existing HTTP/SSE transport; "websocket" uses Responses WebSocket mode.
 	Transport string `json:"transport,omitempty"`
@@ -253,11 +248,10 @@ func (t *OutboundTransformer) TransformRequest(ctx context.Context, llmReq *llm.
 		}
 	}
 
-	enableExplicitPromptCache := t.config.EnableExplicitPromptCache && supportsExplicitPromptCache(llmReq.Model)
 	input := convertInputFromMessagesWithPromptCache(
 		llmReq.Messages,
 		llmReq.TransformOptions,
-		enableExplicitPromptCache,
+		supportsExplicitPromptCache(llmReq.Model),
 	)
 
 	payload := Request{

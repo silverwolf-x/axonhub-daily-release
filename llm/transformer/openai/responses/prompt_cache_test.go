@@ -1,7 +1,6 @@
 package responses
 
 import (
-	"context"
 	"encoding/json"
 	"testing"
 
@@ -9,7 +8,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/looplj/axonhub/llm"
-	"github.com/looplj/axonhub/llm/auth"
 )
 
 func TestSupportsExplicitPromptCache(t *testing.T) {
@@ -94,58 +92,6 @@ func TestPromptCacheBreakpointIsNotEmittedForUnsupportedModels(t *testing.T) {
 
 	require.Nil(t, input.Items[0].Content.Items[0].PromptCacheBreakpoint)
 	require.Nil(t, promptCacheOptionsForInput(input))
-}
-
-func TestTransformRequestPromptCacheRequiresChannelOptIn(t *testing.T) {
-	tests := []struct {
-		name       string
-		model      string
-		enabled    bool
-		breakpoint bool
-	}{
-		{name: "supported model disabled by default", model: "gpt-5.6-sol", enabled: false, breakpoint: false},
-		{name: "supported model explicitly enabled", model: "gpt-5.6-sol", enabled: true, breakpoint: true},
-		{name: "unsupported model explicitly enabled", model: "gpt-5.5", enabled: true, breakpoint: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			transformer, err := NewOutboundTransformerWithConfig(&Config{
-				BaseURL:                   "https://api.openai.com",
-				APIKeyProvider:            auth.NewStaticKeyProvider("test-api-key"),
-				EnableExplicitPromptCache: tt.enabled,
-			})
-			require.NoError(t, err)
-
-			httpReq, err := transformer.TransformRequest(context.Background(), &llm.Request{
-				Model: tt.model,
-				Messages: []llm.Message{{
-					Role: "user",
-					Content: llm.MessageContent{
-						Content: lo.ToPtr("stable context"),
-					},
-					CacheControl: &llm.CacheControl{Type: "ephemeral"},
-				}},
-				TransformOptions: llm.TransformOptions{
-					ArrayInputs: lo.ToPtr(true),
-				},
-			})
-			require.NoError(t, err)
-
-			var payload Request
-			require.NoError(t, json.Unmarshal(httpReq.Body, &payload))
-			require.Len(t, payload.Input.Items, 1)
-			require.Len(t, payload.Input.Items[0].Content.Items, 1)
-
-			if tt.breakpoint {
-				require.Equal(t, &PromptCacheBreakpoint{Mode: "explicit"}, payload.Input.Items[0].Content.Items[0].PromptCacheBreakpoint)
-				require.Equal(t, &PromptCacheOptions{Mode: "explicit"}, payload.PromptCacheOptions)
-			} else {
-				require.Nil(t, payload.Input.Items[0].Content.Items[0].PromptCacheBreakpoint)
-				require.Nil(t, payload.PromptCacheOptions)
-			}
-		})
-	}
 }
 
 func TestPromptCacheFieldsMarshalWithResponsesNames(t *testing.T) {
