@@ -2,7 +2,9 @@ name: Sync upstream and publish prerelease
 
 on:
   schedule:
-    - cron: '0 0 * * *'
+    # Run shortly after local midnight; minute 17 avoids top-of-hour load.
+    - cron: '17 0 * * *'
+      timezone: 'Asia/Shanghai'
   workflow_dispatch:
     inputs:
       dry_run:
