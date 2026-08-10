@@ -38,7 +38,7 @@ jobs:
 
     steps:
       - name: Check out fork unstable branch
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: unstable
           fetch-depth: 0

@@ -13,7 +13,7 @@ jobs:
       build_date: ${{ steps.pin.outputs.build_date }}
     steps:
       - name: Check out unstable
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: unstable
           fetch-depth: 1
@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Check out pinned commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.commit_sha }}
           fetch-depth: 1
