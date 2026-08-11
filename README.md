@@ -1,4 +1,8 @@
+
+
+
 <div align="center">
+  
 
 # AxonHub - All-in-one AI 开发平台
 ### 任意 SDK、任意模型、零代码改动
@@ -8,6 +12,9 @@
 </div>
 
 <div align="center">
+  
+[![GitHub Release](https://img.shields.io/github/v/release/silverwolf-x/axonhub-daily-release?include_prereleases&sort=date&display_name=tag&label=fork%20release)](https://github.com/silverwolf-x/axonhub-daily-release/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/looplj/axonhub?include_prereleases&sort=date&display_name=tag&label=official%20release)](https://github.com/silverwolf-x/axonhub-daily-release/releases)
 
 [![测试状态](https://github.com/looplj/axonhub/actions/workflows/test.yml/badge.svg)](https://github.com/looplj/axonhub/actions/workflows/test.yml)
 [![Lint 状态](https://github.com/looplj/axonhub/actions/workflows/lint.yml/badge.svg)](https://github.com/looplj/axonhub/actions/workflows/lint.yml)
