@@ -1,0 +1,456 @@
+name: Sync upstream and publish prerelease
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+      timezone: 'Asia/Shanghai'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 是否 dry-run（仅预览，不推送或发布）
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: looplj/axonhub
+  UPSTREAM_BRANCH: unstable
+  FORK_BRANCH: unstable
+
+jobs:
+  sync:
+    name: Sync upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      action: ${{ steps.sync.outputs.action }}
+      release_tag: ${{ steps.sync.outputs.release_tag }}
+      should_release: ${{ steps.sync.outputs.should_release }}
+      copy_upstream_metadata: ${{ steps.sync.outputs.copy_upstream_metadata }}
+
+    steps:
+      - name: Check out fork unstable branch
+        uses: actions/checkout@v7
+        with:
+          ref: unstable
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Determine and apply upstream update
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+        run: |
+          set -euo pipefail
+
+          set_result() {
+            local action="$1"
+            local release_tag="${2:-}"
+            local should_release="${3:-false}"
+            local copy_upstream_metadata="${4:-false}"
+
+            {
+              echo "action=$action"
+              echo "release_tag=$release_tag"
+              echo "should_release=$should_release"
+              echo "copy_upstream_metadata=$copy_upstream_metadata"
+            } >> "$GITHUB_OUTPUT"
+
+            {
+              echo "### Upstream sync decision"
+              echo "- Action: \`$action\`"
+              if [[ -n "$release_tag" ]]; then
+                echo "- Release tag: \`$release_tag\`"
+              fi
+              echo "- Dry run: \`$DRY_RUN\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+          }
+
+          has_release() {
+            local tag="$1"
+            jq -e --arg tag "$tag" 'any(.[]; .tag_name == $tag)' \
+              <<< "$fork_releases" >/dev/null
+          }
+
+          has_tag() {
+            git show-ref --verify --quiet "refs/tags/$1"
+          }
+
+          has_upstream_content_changes() {
+            local base="$1"
+            local target="$2"
+            ! git diff --quiet "$base" "$target" -- \
+              . ':(exclude).github/workflows/**' \
+              ':(exclude).github/upstream-sync-state.json'
+          }
+
+          update_sync_state() {
+            local commit="$1"
+            local release_tag="${2:-}"
+            local state_file='.github/upstream-sync-state.json'
+            local state_tmp
+            state_tmp="$(mktemp)"
+            jq --arg commit "$commit" --arg release_tag "$release_tag" '
+              .last_upstream_commit = $commit
+              | if $release_tag == "" then .
+                else .last_upstream_release = $release_tag
+                end
+            ' "$state_file" > "$state_tmp"
+            mv "$state_tmp" "$state_file"
+            git add -- "$state_file"
+          }
+
+          apply_upstream_delta() {
+            local base="$1"
+            local target="$2"
+            local message="$3"
+            local release_tag="${4:-}"
+            local patch_file
+            local conflicted_files
+
+            if ! git merge-base --is-ancestor "$base" "$target" && \
+              ! git merge-base --is-ancestor "$target" "$base"; then
+              echo "::error::Upstream commits '$base' and '$target' are unrelated."
+              exit 1
+            fi
+
+            patch_file="$(mktemp)"
+            git diff --binary "$base" "$target" -- \
+              . ':(exclude).github/workflows/**' \
+              ':(exclude).github/upstream-sync-state.json' > "$patch_file"
+
+            if [[ -s "$patch_file" ]] && ! git apply --index --3way "$patch_file"; then
+              conflicted_files="$(git diff --name-only --diff-filter=U)"
+              echo '::error::Fork customizations conflict with non-workflow upstream changes.'
+              if [[ -n "$conflicted_files" ]]; then
+                printf '%s\n' "$conflicted_files"
+              fi
+              exit 1
+            fi
+            rm -f "$patch_file"
+
+            update_sync_state "$target" "$release_tag"
+            if ! git diff --cached --quiet -- .github/workflows; then
+              echo '::error::Refusing to include workflow changes in an automated sync commit.'
+              exit 1
+            fi
+            git commit -m "$message"
+          }
+
+          push_updates() {
+            local tag="${1:-}"
+            local workflow_changes
+
+            workflow_changes="$(
+              git log --format= --name-only "$fork_head..HEAD" -- .github/workflows \
+                | sort -u
+            )"
+            if [[ -n "$workflow_changes" ]]; then
+              echo '::error::Refusing to push commits that change workflow files:'
+              printf '%s\n' "$workflow_changes"
+              exit 1
+            fi
+
+            if [[ -n "$tag" ]]; then
+              git push --atomic origin \
+                "HEAD:refs/heads/$FORK_BRANCH" "refs/tags/$tag"
+            else
+              git push origin "HEAD:refs/heads/$FORK_BRANCH"
+            fi
+          }
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch --force --tags origin \
+            "+refs/heads/$FORK_BRANCH:refs/remotes/origin/$FORK_BRANCH"
+          if git remote get-url upstream >/dev/null 2>&1; then
+            git remote set-url upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          else
+            git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
+          fi
+          git fetch --force --no-tags upstream \
+            "+refs/heads/$UPSTREAM_BRANCH:refs/remotes/upstream/$UPSTREAM_BRANCH"
+
+          fork_head="$(git rev-parse "refs/remotes/origin/$FORK_BRANCH")"
+          upstream_head="$(git rev-parse "refs/remotes/upstream/$UPSTREAM_BRANCH")"
+
+          upstream_releases="$(
+            gh api --paginate --slurp \
+              "repos/${UPSTREAM_REPOSITORY}/releases?per_page=100" \
+              | jq -c '[add[]? | select(.draft == false)]
+                | sort_by(.published_at // .created_at)'
+          )"
+          fork_releases="$(
+            gh api --paginate --slurp \
+              "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              | jq -c '[add[]?]'
+          )"
+
+          sync_state="$(git show "${fork_head}:.github/upstream-sync-state.json")"
+          last_upstream_commit="$(jq -er '.last_upstream_commit' <<< "$sync_state")"
+          last_upstream_release="$(jq -er '.last_upstream_release' <<< "$sync_state")"
+
+          if [[ ! "$last_upstream_commit" =~ ^[0-9a-f]{40}$ ]] || \
+            ! git cat-file -e "$last_upstream_commit^{commit}"; then
+            echo "::error::Invalid upstream commit baseline: $last_upstream_commit"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$last_upstream_commit" "$upstream_head"; then
+            echo '::error::The upstream branch no longer contains the recorded commit baseline.'
+            exit 1
+          fi
+          if [[ ! "$last_upstream_release" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)-beta([0-9]+)$ ]]; then
+            echo "::error::Unsupported upstream release baseline: $last_upstream_release"
+            exit 1
+          fi
+
+          version_core="${BASH_REMATCH[1]}"
+          beta_number="${BASH_REMATCH[2]}"
+          next_beta="v${version_core}-beta$((beta_number + 1))"
+
+          if ! jq -e --arg tag "$last_upstream_release" \
+            'any(.[]; .tag_name == $tag)' \
+            <<< "$upstream_releases" >/dev/null; then
+            echo "::error::The upstream baseline release '$last_upstream_release' was not found."
+            exit 1
+          fi
+
+          latest_rc_tag=''
+          latest_rc_number=0
+          while IFS= read -r tag; do
+            suffix="${tag#"${next_beta}-rc"}"
+            if [[ "$tag" == "${next_beta}-rc${suffix}" && "$suffix" =~ ^[0-9]+$ ]]; then
+              if (( 10#$suffix > latest_rc_number )); then
+                latest_rc_number=$((10#$suffix))
+                latest_rc_tag="$tag"
+              fi
+            fi
+          done < <(git tag --list "${next_beta}-rc*")
+
+          # Retry an interrupted publish before advancing the state or RC counter.
+          if has_tag "$last_upstream_release" && ! has_release "$last_upstream_release"; then
+            echo "Release '$last_upstream_release' is missing; retrying it."
+            set_result repair "$last_upstream_release" \
+              "$([[ "$DRY_RUN" == 'true' ]] && echo false || echo true)" true
+            exit 0
+          fi
+          if [[ -n "$latest_rc_tag" ]] && ! has_release "$latest_rc_tag"; then
+            echo "Release '$latest_rc_tag' is missing; retrying it."
+            set_result repair "$latest_rc_tag" \
+              "$([[ "$DRY_RUN" == 'true' ]] && echo false || echo true)" false
+            exit 0
+          fi
+
+          pending_release="$(
+            jq -c --arg last "$last_upstream_release" '
+              (map(.tag_name) | index($last)) as $index
+              | if $index == null then
+                  error("upstream baseline release is missing")
+                else
+                  (.[($index + 1):]
+                    | map(select(.tag_name | test("^v[0-9]+\\.[0-9]+\\.[0-9]+-beta[0-9]+$")))
+                    | first // empty)
+                end
+            ' <<< "$upstream_releases"
+          )"
+
+          if [[ -n "$pending_release" ]]; then
+            release_tag="$(jq -r '.tag_name' <<< "$pending_release")"
+            if [[ "$DRY_RUN" == 'true' ]]; then
+              echo "Would mirror upstream release '$release_tag' without changing fork workflows."
+              set_result mirror "$release_tag" false true
+              exit 0
+            fi
+
+            upstream_ref="refs/upstream-sync/tags/$release_tag"
+            git fetch --force --no-tags upstream \
+              "refs/tags/$release_tag:$upstream_ref"
+            upstream_commit="$(git rev-parse "$upstream_ref^{commit}")"
+            if ! git merge-base --is-ancestor "$upstream_commit" "$upstream_head"; then
+              echo "::error::Upstream release '$release_tag' is not on '$UPSTREAM_BRANCH'."
+              exit 1
+            fi
+
+            apply_upstream_delta "$last_upstream_commit" "$upstream_commit" \
+              "chore: sync upstream release $release_tag [skip ci]" "$release_tag"
+            release_commit="$(git rev-parse HEAD)"
+
+            tag_is_new=true
+            if has_tag "$release_tag"; then
+              tag_is_new=false
+              echo "Fork tag '$release_tag' already exists; keeping its current target."
+            else
+              git tag "$release_tag" "$release_commit"
+            fi
+
+            if [[ "$upstream_commit" != "$upstream_head" ]]; then
+              apply_upstream_delta "$upstream_commit" "$upstream_head" \
+                "chore: sync upstream $UPSTREAM_BRANCH ${upstream_head:0:12} [skip ci]" \
+                "$release_tag"
+            fi
+
+            if [[ "$tag_is_new" == 'true' ]]; then
+              push_updates "$release_tag"
+            else
+              push_updates
+            fi
+
+            if has_release "$release_tag"; then
+              set_result mirror "$release_tag" false true
+            else
+              set_result mirror "$release_tag" true true
+            fi
+            exit 0
+          fi
+
+          if [[ "$last_upstream_commit" == "$upstream_head" ]]; then
+            echo "Fork '$FORK_BRANCH' is current with the recorded upstream baseline."
+            set_result idle
+            exit 0
+          fi
+
+          if ! has_upstream_content_changes "$last_upstream_commit" "$upstream_head"; then
+            if [[ "$DRY_RUN" == 'true' ]]; then
+              echo 'Would advance the upstream baseline; only upstream workflow files changed.'
+              set_result sync
+              exit 0
+            fi
+
+            apply_upstream_delta "$last_upstream_commit" "$upstream_head" \
+              "chore: advance upstream workflow baseline ${upstream_head:0:12} [skip ci]"
+            push_updates
+            set_result sync
+            exit 0
+          fi
+
+          release_tag="${next_beta}-rc$((latest_rc_number + 1))"
+          if [[ "$DRY_RUN" == 'true' ]]; then
+            echo "Would sync non-workflow changes from '$upstream_head' and publish '$release_tag'."
+            set_result rc "$release_tag" false false
+            exit 0
+          fi
+
+          apply_upstream_delta "$last_upstream_commit" "$upstream_head" \
+            "chore: sync upstream $UPSTREAM_BRANCH ${upstream_head:0:12} [skip ci]"
+
+          if has_tag "$release_tag"; then
+            echo "::error::Refusing to overwrite existing tag '$release_tag'."
+            exit 1
+          fi
+          git tag "$release_tag" HEAD
+          push_updates "$release_tag"
+
+          set_result rc "$release_tag" true false
+
+  publish:
+    name: Publish ${{ needs.sync.outputs.release_tag }}
+    needs: sync
+    if: needs.sync.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.sync.outputs.release_tag }}
+      UPSTREAM_REPOSITORY: ${{ needs.sync.outputs.copy_upstream_metadata == 'true' && 'looplj/axonhub' || '' }}
+    steps:
+      - name: Resolve canonical repository
+        id: repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          canonical_repository="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.full_name')"
+          echo "Using canonical repository: ${canonical_repository}"
+          echo "name=${canonical_repository}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.repository.outputs.name }}
+          ref: ${{ needs.sync.outputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag '$RELEASE_TAG'."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::Release tag '$RELEASE_TAG' does not exist."
+            exit 1
+          fi
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install
+        working-directory: frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Verify production dependency graphs
+        run: |
+          ./scripts/verify-go-sse-dependency-test.sh
+          ./scripts/verify-go-sse-dependency.sh
+
+      - name: Update VERSION file
+        if: ${{ !contains(needs.sync.outputs.release_tag, 'beta') && !contains(needs.sync.outputs.release_tag, 'rc') }}
+        run: |
+          echo "Updating VERSION file to: $RELEASE_TAG"
+          echo "$RELEASE_TAG" > internal/build/VERSION
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --clean --skip=validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ env.RELEASE_TAG }}
+
+      - name: Copy upstream release metadata
+        if: ${{ needs.sync.outputs.copy_upstream_metadata == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api "repos/${UPSTREAM_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          )"
+          release_name="$(jq -r '.name // ""' <<< "$release_json")"
+          if [[ -z "$release_name" ]]; then
+            release_name="$RELEASE_TAG"
+          fi
+          jq -r '.body // ""' <<< "$release_json" > upstream-release-notes.md
+          prerelease="$(jq -r '.prerelease' <<< "$release_json")"
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "${{ steps.repository.outputs.name }}" \
+            --title "$release_name" \
+            --notes-file upstream-release-notes.md \
+            --prerelease="$prerelease"
