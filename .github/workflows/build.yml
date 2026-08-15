@@ -1,16 +1,7 @@
 name: Build
 
 on:
-  push:
-    branches:
-      - unstable
-      - development
-      - 'release/**'
-  pull_request:
-    branches:
-      - unstable
-      - development
-      - 'release/**'
+  workflow_dispatch:
 
 env:
   GO111MODULE: on
