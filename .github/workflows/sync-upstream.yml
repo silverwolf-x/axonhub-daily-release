@@ -1,0 +1,176 @@
+name: Sync upstream and publish prerelease
+
+on:
+  schedule:
+    - cron: '0 4 * * *'
+      timezone: 'Asia/Shanghai'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 是否 dry-run（仅预览，不推送或发布）
+        required: false
+        default: false
+        type: boolean
+      rebuild:
+        description: 强制重建唯一的 fork 自定义提交（不强制发布）
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPOSITORY: looplj/axonhub
+  UPSTREAM_BRANCH: unstable
+  FORK_BRANCH: unstable
+  FORK_COMMIT_AUTHOR_NAME: silverwolf-x
+  FORK_COMMIT_AUTHOR_EMAIL: 104623550+silverwolf-x@users.noreply.github.com
+
+jobs:
+  sync:
+    name: Sync upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      action: ${{ steps.sync.outputs.action }}
+      release_tag: ${{ steps.sync.outputs.release_tag }}
+      should_release: ${{ steps.sync.outputs.should_release }}
+      copy_upstream_metadata: ${{ steps.sync.outputs.copy_upstream_metadata }}
+
+    steps:
+      - name: Check out fork unstable branch
+        uses: actions/checkout@v7
+        with:
+          ref: unstable
+          fetch-depth: 0
+          fetch-tags: true
+          ssh-key: ${{ secrets.UPSTREAM_SYNC_SSH_KEY }}
+
+      - name: Rebuild fork and determine release
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+          FORCE_REBUILD: ${{ github.event_name == 'workflow_dispatch' && inputs.rebuild || false }}
+        run: bash .github/scripts/sync-upstream.sh
+
+  publish:
+    name: Publish ${{ needs.sync.outputs.release_tag }}
+    needs: sync
+    if: needs.sync.outputs.should_release == 'true'
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ needs.sync.outputs.release_tag }}
+      UPSTREAM_REPOSITORY: ${{ needs.sync.outputs.copy_upstream_metadata == 'true' && 'looplj/axonhub' || '' }}
+    steps:
+      - name: Resolve canonical repository
+        id: repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          canonical_repository="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.full_name')"
+          echo "Using canonical repository: ${canonical_repository}"
+          echo "name=${canonical_repository}" >> "$GITHUB_OUTPUT"
+
+      - name: Check out release tag
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ steps.repository.outputs.name }}
+          ref: ${{ needs.sync.outputs.release_tag }}
+          fetch-depth: 0
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Invalid release tag '$RELEASE_TAG'."
+            exit 1
+          fi
+          if ! git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            echo "::error::Release tag '$RELEASE_TAG' does not exist."
+            exit 1
+          fi
+
+      - name: Load fork release configuration
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh api \
+            "repos/${{ steps.repository.outputs.name }}/contents/.goreleaser.yml?ref=${FORK_BRANCH}" \
+            -H 'Accept: application/vnd.github.raw+json' \
+            > "$RUNNER_TEMP/goreleaser.yml"
+          test -s "$RUNNER_TEMP/goreleaser.yml"
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install
+        working-directory: frontend
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: stable
+          cache: true
+
+      - name: Verify production dependency graphs
+        run: |
+          ./scripts/verify-go-sse-dependency-test.sh
+          ./scripts/verify-go-sse-dependency.sh
+
+      - name: Update VERSION file
+        if: ${{ !contains(needs.sync.outputs.release_tag, 'beta') && !contains(needs.sync.outputs.release_tag, 'rc') }}
+        run: |
+          echo "Updating VERSION file to: $RELEASE_TAG"
+          echo "$RELEASE_TAG" > internal/build/VERSION
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --config ${{ runner.temp }}/goreleaser.yml --clean --skip=validate
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ env.RELEASE_TAG }}
+
+      - name: Copy upstream release metadata
+        if: ${{ needs.sync.outputs.copy_upstream_metadata == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(
+            gh api "repos/${UPSTREAM_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+          )"
+          release_name="$(jq -r '.name // ""' <<< "$release_json")"
+          if [[ -z "$release_name" ]]; then
+            release_name="$RELEASE_TAG"
+          fi
+          jq -r '.body // ""' <<< "$release_json" > upstream-release-notes.md
+          prerelease="$(jq -r '.prerelease' <<< "$release_json")"
+
+          gh release edit "$RELEASE_TAG" \
+            --repo "${{ steps.repository.outputs.name }}" \
+            --title "$release_name" \
+            --notes-file upstream-release-notes.md \
+            --prerelease="$prerelease"
