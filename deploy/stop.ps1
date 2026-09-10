@@ -1,165 +1,32 @@
 param(
-    [Parameter(ValueFromRemainingArguments=$true)]
-    [string[]]$ArgsFromCmd
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$ArgsFromCmd
 )
 
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-function Write-Info([string]$m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
-function Write-Success([string]$m){ Write-Host "[SUCCESS] $m" -ForegroundColor Green }
-function Write-Warn([string]$m){ Write-Host "[WARNING] $m" -ForegroundColor Yellow }
-function Write-Err([string]$m){ Write-Host "[ERROR] $m" -ForegroundColor Red }
-
-$ServiceName = 'axonhub'
-$BaseDir = Join-Path $env:LOCALAPPDATA 'AxonHub'
-$PidFile = Join-Path $BaseDir 'axonhub.pid'
-$ProcessName = 'axonhub'
+. (Join-Path $PSScriptRoot 'axonhub-common.ps1')
 
 function Show-Usage {
-  Write-Host @" 
+  Write-Host @"
 Usage: stop.bat [--force]
 
-This script stops AxonHub directly (no service manager).
+Stops the AxonHub process started from $BinaryPath.
 Options:
-  --force     Force kill all AxonHub processes
-  --help, -h  Show this help message
+  --force        Stop every axonhub.exe process, wherever it was started from
+  -v, --verbose  Print debug logs
+  -h, --help     Show this help
 "@
 }
 
-$Force = $false
+$All = $false
 foreach($a in $ArgsFromCmd){
   switch -Regex ($a){
-    '^(--force)$' { $Force = $true; continue }
+    '^(--force|-f)$' { $All = $true; continue }
+    '^(--verbose|-v)$' { $VerboseFlag = $true; continue }
     '^(--help|-h)$' { Show-Usage; exit 0 }
-    default { Write-Warn "Unknown option: $a" }
+    default { Write-Err "Unknown option: $a"; Show-Usage; exit 2 }
   }
 }
 
-function Stop-ByPid(){
-  Write-Info 'Stopping AxonHub using PID file...'
-  if(-not (Test-Path $PidFile)){
-    Write-Warn "PID file not found at $PidFile"
-    return $false
-  }
-  try {
-    $processId = Get-Content -Path $PidFile -ErrorAction Stop
-  } catch {
-    Write-Warn 'Unable to read PID file'
-    Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-    return $false
-  }
-  if(-not ($processId -match '^[0-9]+$')){
-    Write-Err "Invalid PID in file: $processId"
-    Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-    return $false
-  }
-  # A live PID alone does not prove it is our process: Windows recycles PIDs, so a PID
-  # left over from a previous run (typically after a reboot) can belong to anything.
-  $proc = Get-Process -Id $processId -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'axonhub' }
-  if(-not $proc){
-    Write-Warn "Process with PID $processId is not running AxonHub (PID may have been reused)"
-    Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-    return $false
-  }
-  Write-Info "Stopping process $processId ..."
-  try { Stop-Process -Id $processId -ErrorAction SilentlyContinue } catch {}
-  # Wait up to 10 seconds
-  $timeout = 10
-  for($i=0; $i -lt $timeout; $i++){
-    Start-Sleep -Seconds 1
-    if(-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)){ break }
-  }
-  if(Get-Process -Id $processId -ErrorAction SilentlyContinue){
-    Write-Warn 'Process did not stop gracefully, forcing termination...'
-    try { Stop-Process -Id $processId -Force -ErrorAction SilentlyContinue } catch {}
-    Start-Sleep -Seconds 2
-  }
-  if(-not (Get-Process -Id $processId -ErrorAction SilentlyContinue)){
-    Write-Success "AxonHub stopped successfully (PID: $processId)"
-    Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-    return $true
-  } else {
-    Write-Err 'Failed to stop AxonHub process'
-    return $false
-  }
+Invoke-AxonHubScript {
+  Stop-AxonHub -All:$All
 }
-
-function Stop-ByProcessName(){
-  Write-Info 'Stopping AxonHub by process name...'
-  $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^axonhub' }
-  if(-not $procs){
-    Write-Warn 'No AxonHub processes found'
-    return $false
-  }
-  Write-Info ("Found AxonHub processes: " + ($procs.Id -join ' '))
-  foreach($p in $procs){
-    Write-Info ("Stopping process " + $p.Id + ' ...')
-    try { Stop-Process -Id $p.Id -ErrorAction SilentlyContinue } catch {}
-    # Wait up to 10 seconds each
-    $timeout = 10
-    for($i=0; $i -lt $timeout; $i++){
-      Start-Sleep -Seconds 1
-      if(-not (Get-Process -Id $p.Id -ErrorAction SilentlyContinue)){ break }
-    }
-    if(Get-Process -Id $p.Id -ErrorAction SilentlyContinue){
-      Write-Warn ("Process " + $p.Id + ' did not stop gracefully, forcing...')
-      try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {}
-    }
-  }
-  Start-Sleep -Seconds 2
-  $remaining = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^axonhub' }
-  if(-not $remaining){
-    Write-Success 'All AxonHub processes stopped successfully'
-    Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-    return $true
-  } else {
-    Write-Err ("Some AxonHub processes are still running: " + ($remaining.Id -join ' '))
-    return $false
-  }
-}
-
-function Check-Running(){
-  $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^axonhub' }
-  if($procs){
-    Write-Info 'Running AxonHub processes:'
-    $procs | Select-Object Id,ProcessName,Path | Format-Table -AutoSize | Out-String | Write-Host
-    return $true
-  }
-  return $false
-}
-
-if($Force){
-  Write-Info 'Force stopping all AxonHub processes...'
-  $procs = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^axonhub' }
-  if($procs){
-    foreach($p in $procs){ try { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } catch {} }
-    Start-Sleep -Seconds 2
-    $still = Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -match '^axonhub' }
-    if(-not $still){
-      Write-Success 'All AxonHub processes force-stopped'
-      Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-    } else {
-      Write-Err 'Failed to force-stop some processes'
-      exit 1
-    }
-  } else {
-    Write-Info 'No AxonHub processes found'
-  }
-  exit 0
-}
-
-Write-Info 'Stopping AxonHub...'
-$stopped = $false
-if(Stop-ByPid){ $stopped = $true }
-if(-not $stopped){ if(Stop-ByProcessName){ $stopped = $true } }
-if(-not $stopped){
-  if(Check-Running){
-    Write-Err 'Failed to stop all AxonHub processes'
-    exit 1
-  } else {
-    Write-Info 'No AxonHub processes were running'
-  }
-}
-Remove-Item -Force $PidFile -ErrorAction SilentlyContinue
-Write-Success 'AxonHub has been stopped'
