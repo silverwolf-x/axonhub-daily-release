@@ -1,8 +1,6 @@
 name: Publish Docker image (unstable)
 
 on:
-  schedule:
-    - cron: '17 3 * * *'
   workflow_dispatch:
 
 jobs:
@@ -101,8 +99,8 @@ jobs:
             looplj/axonhub:unstable-${{ matrix.arch }}
             looplj/axonhub:unstable-${{ needs.prepare.outputs.build_date }}-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=axonhub-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=axonhub-${{ matrix.arch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           provenance: false
           sbom: false
 

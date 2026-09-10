@@ -5,9 +5,7 @@
 name: Publish Docker image
 
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
 
 jobs:
   build_single_arch:
@@ -69,8 +67,8 @@ jobs:
             looplj/axonhub:${{ env.TAG }}-${{ matrix.arch }}
             looplj/axonhub:latest-${{ matrix.arch }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=axonhub-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=axonhub-${{ matrix.arch }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           provenance: false
           sbom: false
 
