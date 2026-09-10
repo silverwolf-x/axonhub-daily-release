@@ -1,245 +1,94 @@
 param(
-    [Parameter(ValueFromRemainingArguments=$true)]
-    [string[]]$ArgsFromCmd
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$ArgsFromCmd
 )
 
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-function Write-Info([string]$m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
-function Write-Success([string]$m){ Write-Host "[SUCCESS] $m" -ForegroundColor Green }
-function Write-Warn([string]$m){ Write-Host "[WARNING] $m" -ForegroundColor Yellow }
-function Write-Err([string]$m){ Write-Host "[ERROR] $m" -ForegroundColor Red }
-
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
-$Repo = 'looplj/axonhub'
-$Api = "https://api.github.com/repos/$Repo"
-
-$IncludeBeta = $false
-$IncludeRC   = $false
-$VerboseFlag = $false
-$Force       = $false
-$Yes         = $false
+. (Join-Path $PSScriptRoot 'axonhub-common.ps1')
 
 function Show-Usage {
-  Write-Host @'
+  Write-Host @"
 AxonHub Upgrade Script (Windows)
 
-Usage: upgrade.bat [options]
+Source: $AxonHubRepo
+Usage: upgrade.bat [options] [version]
 
 Options:
-  -y, --yes        Skip confirmation prompt and upgrade automatically
-  -f, --force      Force upgrade even if already on latest version
-  -b, --beta       Consider beta pre-releases when checking for updates
-  -r, --rc         Consider release-candidate pre-releases when checking for updates
-  -v, --verbose    Print extra debug logs
-  -h, --help       Show this help message
+  -y, --yes         Upgrade without asking for confirmation
+  -f, --force       Reinstall even if already on the target version
+  -c, --check       Only report the available version; change nothing
+      --stable      Consider stable releases only
+  -p, --prerelease  Include prereleases (default; -b/--beta and -r/--rc are aliases)
+  -v, --verbose     Print debug logs
+  -h, --help        Show this help
 
 Examples:
-  upgrade.bat              Check and prompt for upgrade
-  upgrade.bat -y           Upgrade without confirmation
-  upgrade.bat --beta       Check beta releases
-'@
+  upgrade.bat                       Check and prompt for upgrade
+  upgrade.bat --check               Only check for updates
+  upgrade.bat -y                    Upgrade without confirmation
+  upgrade.bat v1.0.0-beta12-rc16    Install a specific version
+"@
 }
+
+$IncludePrerelease = $true
+$CheckOnly = $false
+$Force = $false
+$Yes = $false
+$Version = ''
 
 foreach($a in $ArgsFromCmd){
   switch -Regex ($a){
-    '^(--yes|-y)$'    { $Yes = $true; continue }
-    '^(--force|-f)$'  { $Force = $true; continue }
-    '^(--beta|-b)$'   { $IncludeBeta = $true; continue }
-    '^(--rc|-r)$'     { $IncludeRC = $true; continue }
-    '^(--verbose|-v)$'{ $VerboseFlag = $true; continue }
-    '^(--help|-h)$'   { Show-Usage; exit 0 }
-    default           { Write-Warn "Unknown option: $a" }
+    '^(--yes|-y)$' { $Yes = $true; continue }
+    '^(--force|-f)$' { $Force = $true; continue }
+    '^(--check|-c)$' { $CheckOnly = $true; continue }
+    '^--stable$' { $IncludePrerelease = $false; continue }
+    '^(--prerelease|-p|--beta|-b|--rc|-r)$' { $IncludePrerelease = $true; continue }
+    '^(--verbose|-v)$' { $VerboseFlag = $true; continue }
+    '^(--help|-h)$' { Show-Usage; exit 0 }
+    '^[vV]?\d+\.\d+\.\d+' { $Version = $a; continue }
+    default { Write-Err "Unknown option: $a"; Show-Usage; exit 2 }
   }
 }
 
-function Get-Platform {
-  $archEnv = $env:PROCESSOR_ARCHITECTURE
-  switch ($archEnv.ToLower()){
-    'amd64' { return 'windows_amd64' }
-    'arm64' { return 'windows_arm64' }
-    default { Write-Err "Unsupported architecture: $archEnv"; exit 1 }
+Invoke-AxonHubScript {
+  if(-not (Test-Path -LiteralPath $BinaryPath -PathType Leaf)){
+    throw "AxonHub is not installed at $BinaryPath. Run install.bat first."
   }
-}
 
-function Invoke-GHApi([string]$url){
-  $headers = @{
-    'Accept'='application/vnd.github+json'
-    'X-GitHub-Api-Version'='2022-11-28'
-    'User-Agent'='axonhub-upgrader'
-  }
-  if($env:GITHUB_TOKEN){ $headers['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
-  return Invoke-RestMethod -Method GET -Uri $url -Headers $headers -ErrorAction Stop
-}
+  $current = Get-BinaryVersion $BinaryPath
+  if($current){ Write-Info "Current version: $current" } else { Write-Warn 'Could not determine the current version' }
 
-function Get-LatestReleaseTag {
-  try {
-    $json = Invoke-GHApi "$Api/releases/latest"
-    return $json.tag_name
-  } catch {
-    Write-Warn "API failed or rate-limited, falling back to HTML redirect..."
-    try {
-      $resp = Invoke-WebRequest -Uri "https://github.com/$Repo/releases/latest" -Headers @{ 'User-Agent'='axonhub-upgrader' } -MaximumRedirection 0 -ErrorAction Stop
-    } catch { $resp = $_.Exception.Response }
-    if($resp -and $resp.Headers['Location']){
-      $loc = $resp.Headers['Location']
-      if($loc -match '/tag/([^/]+)$'){ return $matches[1] }
-    }
-    Write-Err "Could not determine latest release version"
-    exit 1
-  }
-}
+  $release = Get-AxonHubRelease $Version $IncludePrerelease
+  $target = [string]$release.tag_name
+  Write-Info "Target version:  $target"
 
-function Get-LatestVersion([bool]$includeBeta,[bool]$includeRC){
-  if(-not $includeBeta -and -not $includeRC){ return Get-LatestReleaseTag }
-  Write-Info "Fetching releases (beta=$includeBeta, rc=$includeRC) ..."
-  try {
-    $rels = Invoke-GHApi "$Api/releases?per_page=100"
-    $filtered = $rels | Where-Object { -not $_.draft }
-    if($includeBeta -and $includeRC){
-      $filtered = $filtered | Where-Object { $_.tag_name -match '-beta' -or $_.tag_name -match '-rc' }
-    } elseif($includeBeta){
-      $filtered = $filtered | Where-Object { $_.tag_name -match '-beta' }
+  $needsUpgrade = (-not $current) -or ((Compare-Version $current $target) -lt 0)
+  # An explicitly requested version is installed even when it is older.
+  if($Version -and $current -ne $target){ $needsUpgrade = $true }
+
+  if($CheckOnly){
+    if($needsUpgrade){
+      Write-Success "Update available: $current -> $target"
+      Write-Info "Download URL: $((Get-ReleaseArchive $release).browser_download_url)"
     } else {
-      $filtered = $filtered | Where-Object { $_.tag_name -match '-rc' }
+      Write-Success "AxonHub is up to date ($current)"
     }
-    if(-not $filtered){
-      Write-Warn 'No matching pre-release found; falling back to latest stable.'
-      return Get-LatestReleaseTag
+    return
+  }
+
+  if(-not $needsUpgrade -and -not $Force){
+    Write-Success "AxonHub is up to date ($current)"
+    return
+  }
+
+  if(-not $Yes){
+    $reply = Read-Host "Upgrade AxonHub from $current to ${target}? [y/N]"
+    if($reply -notmatch '^[Yy]'){
+      Write-Info 'Upgrade cancelled'
+      return
     }
-    return ($filtered | Select-Object -First 1).tag_name
-  } catch {
-    Write-Warn 'Failed to fetch releases; falling back to latest stable.'
-    return Get-LatestReleaseTag
   }
+
+  Install-AxonHubRelease $release
+  Start-AxonHubOrRollback
+  Write-Success "Upgrade completed: $current -> $(Get-BinaryVersion $BinaryPath)"
 }
-
-function Get-AssetUrl([string]$version,[string]$platform){
-  Write-Info "Resolving asset for $version ($platform) ..."
-  try {
-    $json = Invoke-GHApi "$Api/releases/tags/$version"
-    $asset = $json.assets | Where-Object { $_.browser_download_url -match $platform -and $_.browser_download_url -like '*.zip' } | Select-Object -First 1
-    if($asset){ return $asset.browser_download_url }
-  } catch {}
-  $clean = $version.TrimStart('v')
-  $file = "axonhub_${clean}_${platform}.zip"
-  $candidate = "https://github.com/$Repo/releases/download/$version/$file"
-  try {
-    $null = Invoke-WebRequest -Uri $candidate -Method Head -ErrorAction Stop
-    return $candidate
-  } catch {
-    Write-Err "Could not find asset for platform $platform in release $version"
-    exit 1
-  }
-}
-
-function Get-CurrentVersion([string]$binary){
-  if(Test-Path $binary){
-    try {
-      $output = & $binary version 2>$null
-      if($output){
-        return ($output -split "`n")[0].Trim()
-      }
-    } catch {}
-  }
-  return ''
-}
-
-function Compare-Version([string]$a,[string]$b){
-  $aNorm = $a.TrimStart('v')
-  $bNorm = $b.TrimStart('v')
-  $aParts = $aNorm -split '[.\-]'
-  $bParts = $bNorm -split '[.\-]'
-  $maxLen = [Math]::Max($aParts.Length, $bParts.Length)
-  for($i=0; $i -lt $maxLen; $i++){
-    $aVal = if($i -lt $aParts.Length){ $aParts[$i] } else { '0' }
-    $bVal = if($i -lt $bParts.Length){ $bParts[$i] } else { '0' }
-    $aNum = 0; $bNum = 0
-    [int]::TryParse($aVal, [ref]$aNum) | Out-Null
-    [int]::TryParse($bVal, [ref]$bNum) | Out-Null
-    if($aNum -lt $bNum){ return -1 }
-    if($aNum -gt $bNum){ return 1 }
-  }
-  return 0
-}
-
-function Ensure-Dirs([string]$path){ if(-not (Test-Path $path)){ New-Item -ItemType Directory -Force -Path $path | Out-Null } }
-
-Write-Info 'Checking for AxonHub updates...'
-
-$BaseDir = Join-Path $env:LOCALAPPDATA 'AxonHub'
-$BinaryPath = Join-Path $BaseDir 'axonhub.exe'
-
-if(-not (Test-Path $BinaryPath)){
-  Write-Err "AxonHub is not installed at $BinaryPath"
-  Write-Info 'Please run install.bat first'
-  exit 1
-}
-
-$CurrentVersion = Get-CurrentVersion $BinaryPath
-if(-not $CurrentVersion){
-  Write-Warn 'Could not determine current version'
-  $CurrentVersion = 'unknown'
-} else {
-  Write-Info "Current version: $CurrentVersion"
-}
-
-$LatestVersion = Get-LatestVersion $IncludeBeta $IncludeRC
-Write-Info "Latest version: $LatestVersion"
-
-$NeedsUpgrade = $false
-if($CurrentVersion -eq 'unknown'){
-  $NeedsUpgrade = $true
-} else {
-  $cmp = Compare-Version $CurrentVersion $LatestVersion
-  if($cmp -lt 0){ $NeedsUpgrade = $true }
-}
-
-if(-not $NeedsUpgrade -and -not $Force){
-  Write-Success "AxonHub is already up to date ($CurrentVersion)"
-  exit 0
-}
-
-if($Force -and $CurrentVersion -ne 'unknown'){
-  Write-Warn "Force upgrade requested (current: $CurrentVersion, target: $LatestVersion)"
-}
-
-if(-not $Yes){
-  $reply = Read-Host "Upgrade AxonHub from $CurrentVersion to $LatestVersion? [y/N]"
-  if($reply -notmatch '^[Yy]$'){
-    Write-Info 'Upgrade cancelled'
-    exit 0
-  }
-}
-
-$Platform = Get-Platform
-Write-Info "Detected platform: $Platform"
-
-$AssetUrl = Get-AssetUrl $LatestVersion $Platform
-$TempDir = New-Item -ItemType Directory -Path (Join-Path ([IO.Path]::GetTempPath()) ([IO.Path]::GetRandomFileName())) -Force
-$ZipPath = Join-Path $TempDir 'axonhub.zip'
-
-Write-Info "Downloading: $AssetUrl"
-Invoke-WebRequest -Uri $AssetUrl -OutFile $ZipPath -UseBasicParsing
-
-Write-Info 'Extracting archive...'
-Expand-Archive -Path $ZipPath -DestinationPath $TempDir -Force
-
-$NewBinary = Get-ChildItem -Path $TempDir -Recurse -Filter 'axonhub.exe' -File | Select-Object -First 1 | ForEach-Object { $_.FullName }
-if(-not $NewBinary){ Write-Err 'axonhub.exe not found in archive'; exit 1 }
-
-Write-Info 'Installing new binary...'
-Copy-Item -Path $NewBinary -Destination $BinaryPath -Force
-
-Write-Success "AxonHub upgraded to $LatestVersion"
-
-Write-Info 'Restarting AxonHub...'
-$restartScript = Join-Path $ScriptDir 'restart.ps1'
-if(Test-Path $restartScript){
-  & $restartScript
-} else {
-  Write-Warn 'restart.ps1 not found, please restart AxonHub manually'
-}
-
-Write-Success 'Upgrade completed!'
