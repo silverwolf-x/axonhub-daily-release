@@ -1,55 +1,33 @@
 param(
-    [Parameter(ValueFromRemainingArguments=$true)]
-    [string[]]$ArgsFromCmd
+  [Parameter(ValueFromRemainingArguments = $true)]
+  [string[]]$ArgsFromCmd
 )
 
-$ErrorActionPreference = 'Stop'
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-function Write-Info([string]$m){ Write-Host "[INFO] $m" -ForegroundColor Cyan }
-function Write-Success([string]$m){ Write-Host "[SUCCESS] $m" -ForegroundColor Green }
-function Write-Warn([string]$m){ Write-Host "[WARNING] $m" -ForegroundColor Yellow }
-function Write-Err([string]$m){ Write-Host "[ERROR] $m" -ForegroundColor Red }
-
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
+. (Join-Path $PSScriptRoot 'axonhub-common.ps1')
 
 function Show-Usage {
-  Write-Host @" 
+  Write-Host @"
 Usage: restart.bat [--force]
 
-This script restarts AxonHub by stopping and starting it.
+Restarts AxonHub by stopping and starting it.
 Options:
-  --force     Force kill before restart
-  --help, -h  Show this help message
+  --force        Stop every axonhub.exe process before starting
+  -v, --verbose  Print debug logs
+  -h, --help     Show this help
 "@
 }
 
-$Force = $false
+$All = $false
 foreach($a in $ArgsFromCmd){
   switch -Regex ($a){
-    '^(--force)$' { $Force = $true; continue }
+    '^(--force|-f)$' { $All = $true; continue }
+    '^(--verbose|-v)$' { $VerboseFlag = $true; continue }
     '^(--help|-h)$' { Show-Usage; exit 0 }
-    default { Write-Warn "Unknown option: $a" }
+    default { Write-Err "Unknown option: $a"; Show-Usage; exit 2 }
   }
 }
 
-Write-Info 'Restarting AxonHub...'
-
-# Stop AxonHub
-Write-Info 'Stopping AxonHub...'
-$stopScript = Join-Path $ScriptDir 'stop.ps1'
-if($Force){
-  & $stopScript --force
-} else {
-  & $stopScript
+Invoke-AxonHubScript {
+  Stop-AxonHub -All:$All
+  Start-AxonHub
 }
-
-# Brief pause to ensure clean shutdown
-Start-Sleep -Seconds 5
-
-# Start AxonHub
-Write-Info 'Starting AxonHub...'
-$startScript = Join-Path $ScriptDir 'start.ps1'
-& $startScript
-
-Write-Success 'AxonHub has been restarted'
