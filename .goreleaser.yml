@@ -28,39 +28,13 @@ builds:
     hooks:
       post:
         - ./scripts/verify-go-sse-dependency.sh "{{ .Path }}"
-    goos:
-      - linux
-      - windows
-      - darwin
-      - freebsd
-    goarch:
-      - amd64
-      - arm64
-      - loong64
-    goarm:
-      - 7
-    ignore:
-      - goos: windows
-        goarch: arm
-      - goos: windows
-        goarch: s390x
-      - goos: windows
-        goarch: loong64
-      - goos: darwin
-        goarch: arm
-      - goos: darwin
-        goarch: s390x
-      - goos: darwin
-        goarch: loong64
-      - goos: freebsd
-        goarch: arm
-      - goos: freebsd
-        goarch: s390x
-      - goos: freebsd
-        goarch: loong64
+    targets:
+      - windows_amd64_v1
+      - linux_amd64_v1
 
 release:
-  draft: true
+  draft: false
+  prerelease: auto
   extra_files:
     - glob: ./config.schema.json
 
@@ -103,43 +77,6 @@ archives:
         dst: restart.bat
       - src: deploy/upgrade.bat
         dst: upgrade.bat
-
-brews:
-  - name: axonhub
-    ids: [archive]
-    repository:
-      owner: looplj
-      name: homebrew-axonhub
-      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
-    directory: Formula
-    homepage: "https://github.com/looplj/axonhub"
-    description: "All-in-one AI development platform. Use any SDK, access any model."
-    license: "Apache-2.0"
-    url_template: "https://github.com/looplj/axonhub/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
-    commit_author:
-      name: "github-actions[bot]"
-      email: "github-actions[bot]@users.noreply.github.com"
-    install: |
-      libexec.install "axonhub"
-      (etc/"axonhub").mkpath
-      (bin/"axonhub").write <<~SH
-        #!/bin/sh
-        cd "#{etc}/axonhub" || exit 1
-        exec "#{libexec}/axonhub" "$@"
-      SH
-    service: |
-      run [opt_bin/"axonhub"]
-      keep_alive true
-    test: |
-      system "#{bin}/axonhub", "version"
-    caveats: |
-      AxonHub runs with default configuration.
-      To customize, create a config file at: #{etc}/axonhub/config.yml
-
-      View current configuration:
-        axonhub config preview
-
-      The wrapper starts AxonHub from #{etc}/axonhub automatically.
 
 checksum:
   name_template: 'checksums.txt'
